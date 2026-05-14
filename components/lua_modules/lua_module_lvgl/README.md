@@ -8,6 +8,7 @@ This module exposes a small LVGL runtime to Lua scripts.
 - Update widget position, size, text, value, style, and layout via methods
 - Subscribe to LVGL widget events (`obj:on / obj:off`) and dispatch them on
   the script task via `lvgl.process_events / lvgl.run`
+- Bind a touch panel as an LVGL pointer indev via `lvgl.indev_register("touch", ...)`
 - Deinitialize the LVGL runtime and release display ownership
 
 ## How to call
@@ -52,8 +53,9 @@ This module exposes a small LVGL runtime to Lua scripts.
   is asked to stop) or repeated `lvgl.process_events([timeout_ms])` calls.
   This is what makes Lua callbacks safe in a single-script subsystem; see
   RFC §4.2 for the reasoning.
-- P3 does not yet support input device binding, custom fonts, advanced style
-  parts/states, or image decoder/filesystem setup.
+- This release does not yet support encoder/keypad indevs, custom fonts,
+  advanced style parts/states, or image decoder/filesystem setup. Touch
+  is supported via `lvgl.indev_register("touch", touch_handle)`.
 - `lvgl.image(...)` only forwards a string `src` to LVGL. Whether that string
   can load depends on firmware FS and decoder configuration outside this module.
 - Chinese or other non-ASCII text may not render unless the firmware LVGL font configuration includes a matching font.
@@ -173,6 +175,31 @@ lvgl.run()
 react to stop signals faster at the cost of slightly more CPU.
 
 Returns the total number of callbacks invoked across all slices.
+
+### `lvgl.indev_register(kind, handle)`
+
+Registers an input device with the LVGL runtime. `kind` selects the
+device type:
+
+| `kind`    | Expected `handle`                                         | Notes |
+| --------- | --------------------------------------------------------- | ----- |
+| `"touch"` | `esp_lcd_touch_handle_t` lightuserdata, e.g. from `board_manager.get_lcd_touch_handle("display_touch")` | Creates a single `LV_INDEV_TYPE_POINTER` indev. Re-registering raises an error; call `lvgl.indev_unregister("touch")` first. |
+
+Returns `true` on success. The Lua handle is borrowed: tearing down the
+LVGL runtime (`lvgl.deinit()`) deletes the LVGL indev but never frees
+the underlying `esp_lcd_touch` handle, so the same handle stays usable
+by `lua_module_lcd_touch` or other consumers.
+
+```lua
+local touch_handle = board_manager.get_lcd_touch_handle("display_touch")
+lvgl.indev_register("touch", touch_handle)
+```
+
+### `lvgl.indev_unregister(kind)`
+
+Removes a previously registered indev. Returns `true` if a device of
+that kind was attached, `false` otherwise. Safe to call when the LVGL
+runtime is not initialized.
 
 ### Widget factories
 
@@ -377,3 +404,10 @@ auto-cancelled.
   `pending_unrefs` list of registry refs. The LVGL trampoline never touches
   the Lua state; only `process_events / run / obj:off / deinit` running on
   the script task do `lua_pcall` and `luaL_unref`.
+- The touch indev in `src/lua_lvgl_indev.c` polls
+  `esp_lcd_touch_read_data` + `esp_lcd_touch_get_data` from the LVGL task's
+  read callback. The LVGL task already holds `lua_lvgl_lock()` during
+  `lv_timer_handler`, so the read callback intentionally does **not**
+  re-take the lock and instead reads the touch handle from the indev's
+  `user_data` slot, which is set once at register time. Tearing down the
+  runtime stops the LVGL task first and only then deletes the indev.

@@ -4,6 +4,7 @@ idf_component_register(
         "src/lua_lvgl_core_widgets.c"
         "src/lua_lvgl_events.c"
         "src/lua_lvgl_extra_widgets.c"
+        "src/lua_lvgl_indev.c"
         "src/lua_lvgl_layout.c"
         "src/lua_lvgl_methods.c"
         "src/lua_lvgl_object.c"
@@ -17,6 +18,7 @@ idf_component_register(
         cap_lua
         display_arbiter
         esp_lcd
+        esp_lcd_touch
         esp_timer
         lvgl
 )

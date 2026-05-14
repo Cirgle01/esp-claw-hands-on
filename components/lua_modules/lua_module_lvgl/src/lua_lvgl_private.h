@@ -14,8 +14,10 @@
 
 #include "cap_lua.h"
 #include "display_arbiter.h"
+#include "esp_check.h"
 #include "esp_err.h"
 #include "esp_heap_caps.h"
+#include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -29,7 +31,7 @@
 #define LUA_MODULE_LVGL_DEFAULT_BUFFER_LINES 40
 #define LUA_MODULE_LVGL_DEFAULT_TICK_MS 5
 #define LUA_MODULE_LVGL_DEFAULT_TASK_PERIOD_MS 10
-#define LUA_MODULE_LVGL_TASK_STACK 4096
+#define LUA_MODULE_LVGL_TASK_STACK 8192
 #define LUA_MODULE_LVGL_TASK_PRIO 5
 #define LUA_MODULE_LVGL_PANEL_IF_IO 0
 #define LUA_MODULE_LVGL_PANEL_IF_RGB 1
@@ -119,6 +121,7 @@ typedef struct {
     TaskHandle_t task_handle;
     TaskHandle_t task_waiter;
     esp_timer_handle_t tick_timer;
+    SemaphoreHandle_t flush_done;
     lv_display_t *display;
     esp_lcd_panel_handle_t panel;
     esp_lcd_panel_io_handle_t io;
@@ -130,11 +133,19 @@ typedef struct {
     uint32_t task_period_ms;
     void *draw_buf;
     size_t draw_buf_size;
+    bool flush_callbacks_registered;
+    volatile bool flush_pending;
     lua_State *runtime_owner;
     lua_lvgl_obj_record_t *records;
     lua_lvgl_event_sub_t *event_queue_head;
     lua_lvgl_event_sub_t *event_queue_tail;
     lua_lvgl_pending_unref_t *pending_unrefs;
+    /* P4: input devices. Only one indev of each kind is supported on a
+     * single-script runtime; the underlying esp_lcd_touch_handle_t is owned
+     * by board_manager, so we only borrow the pointer here and never free
+     * it when the LVGL runtime is torn down. */
+    lv_indev_t *touch_indev;
+    void *touch_handle;
 } lua_lvgl_state_t;
 
 typedef struct {
@@ -260,3 +271,9 @@ extern const luaL_Reg lua_lvgl_runtime_funcs[];
 extern const luaL_Reg lua_lvgl_core_widget_funcs[];
 extern const luaL_Reg lua_lvgl_extra_widget_funcs[];
 extern const luaL_Reg lua_lvgl_event_module_funcs[];
+extern const luaL_Reg lua_lvgl_indev_module_funcs[];
+
+/* lua_lvgl_indev.c: tear down all currently registered indevs.
+ * Caller must hold lua_lvgl_lock() and the LVGL task must already be
+ * stopped (so no read_cb is running). */
+void lua_lvgl_indev_release_locked(void);
