@@ -239,6 +239,18 @@ menu "App Claw Config"
                 Enable the button Lua module and keep app_claw's direct dependency
                 on lua_module_button when Lua capability is enabled.
 
+        config APP_CLAW_LUA_MODULE_BLE_HID
+            bool "Enable BLE HID Lua module"
+            default y
+            depends on APP_CLAW_CAP_LUA
+            select BT_NIMBLE_HID_SERVICE
+            help
+                Enable the BLE HID Lua module for Consumer Control, Keyboard, Mouse,
+                and local HID behavior. This module owns its BLE HID runtime via
+                ESP-IDF NimBLE and esp_hidd, and exposes the ble_hid.* behavior APIs.
+                Do not start the generic BLE Lua module advertising while BLE HID is
+                running.
+
         config APP_CLAW_LUA_MODULE_CAMERA
             bool "Enable camera Lua module"
             default y if ESP_BOARD_DEV_CAMERA_SUPPORT
@@ -354,7 +366,7 @@ menu "App Claw Config"
 
         config APP_CLAW_LUA_MODULE_LVGL
             bool "Enable LVGL Lua module"
-            default n
+            default y
             help
                 Enable the LVGL Lua module and keep app_claw's direct dependency
                 on lua_module_lvgl when Lua capability is enabled.
