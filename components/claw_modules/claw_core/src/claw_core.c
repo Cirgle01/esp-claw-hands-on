@@ -36,7 +36,7 @@ static const char *TAG = "claw_core";
 #define CLAW_CORE_DEFAULT_REQUEST_Q       4
 #define CLAW_CORE_DEFAULT_RESPONSE_Q      4
 #define CLAW_CORE_DEFAULT_TOOL_ITERATIONS 10
-#define CLAW_CORE_CONTROL_QUEUE_LEN       4
+#define CLAW_CORE_INSERT_QUEUE_LEN        4
 #define CLAW_CORE_INFLIGHT_SESSION_ID_SIZE 128
 #ifndef CLAW_CORE_LOG_SNIPPET_LEN
 #define CLAW_CORE_LOG_SNIPPET_LEN         96
@@ -78,11 +78,6 @@ typedef enum {
 } claw_core_control_abort_reason_t;
 
 typedef struct {
-    uint32_t request_id;
-    char *user_text;
-} claw_core_control_item_t;
-
-typedef struct {
     bool initialized;
     bool started;
     char *system_prompt;
@@ -103,6 +98,7 @@ typedef struct {
     UBaseType_t task_priority;
     BaseType_t task_core;
     uint32_t max_tool_iterations;
+    /* Waiting queue: entries start new agent loops when the core task is idle. */
     QueueHandle_t request_queue;
     QueueHandle_t response_queue;
     TaskHandle_t task_handle;
@@ -115,9 +111,9 @@ typedef struct {
     claw_core_agent_loop_phase_t agent_loop_phase;
     volatile bool inflight_abort;
     claw_core_control_abort_reason_t inflight_abort_reason;
-    claw_core_control_item_t control_queue[CLAW_CORE_CONTROL_QUEUE_LEN];
-    size_t control_queue_head;
-    size_t control_queue_count;
+    claw_core_request_item_t insert_queue[CLAW_CORE_INSERT_QUEUE_LEN];
+    size_t insert_queue_head;
+    size_t insert_queue_count;
 #define CLAW_CORE_MAX_COMPLETION_OBSERVERS 4
     struct {
         claw_core_completion_observer_fn fn;
@@ -128,7 +124,7 @@ typedef struct {
 
 static claw_core_state_t *s_core = NULL;
 
-static void clear_control_queue_locked(void);
+static void clear_insert_queue_locked(void);
 
 static char *dup_string(const char *src)
 {
@@ -164,6 +160,12 @@ static char *dup_printf(const char *fmt, ...)
     vsnprintf(buf, (size_t)needed + 1, fmt, args);
     va_end(args);
     return buf;
+}
+
+static bool claw_core_agent_loop_phase_is_insertable(claw_core_agent_loop_phase_t phase)
+{
+    return phase != CLAW_CORE_AGENT_LOOP_PHASE_IDLE &&
+           phase != CLAW_CORE_AGENT_LOOP_PHASE_FINALIZING;
 }
 
 static const char *log_snippet(const char *text)
@@ -359,7 +361,7 @@ static void claw_core_reset_runtime(void)
     }
     if (s_core->inflight_lock) {
         if (xSemaphoreTake(s_core->inflight_lock, portMAX_DELAY) == pdTRUE) {
-            clear_control_queue_locked();
+            clear_insert_queue_locked();
             xSemaphoreGive(s_core->inflight_lock);
         }
         vSemaphoreDelete(s_core->inflight_lock);
@@ -384,6 +386,54 @@ static void free_request_item(claw_core_request_item_t *item)
     free(item->owned_target_channel);
     free(item->owned_target_chat_id);
     memset(item, 0, sizeof(*item));
+}
+
+static esp_err_t clone_request_item(const claw_core_request_t *request,
+                                    claw_core_request_item_t *out_item)
+{
+    claw_core_request_item_t item = {0};
+
+    if (!request || !out_item || !request->user_text || request->user_text[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    item.view.request_id = request->request_id;
+    item.view.flags = request->flags;
+    item.owned_session_id = dup_string(request->session_id);
+    item.owned_user_text = dup_string(request->user_text);
+    item.owned_source_channel = dup_string(request->source_channel);
+    item.owned_source_chat_id = dup_string(request->source_chat_id);
+    item.owned_source_sender_id = dup_string(request->source_sender_id);
+    item.owned_source_message_id = dup_string(request->source_message_id);
+    item.owned_source_cap = dup_string(request->source_cap);
+    item.owned_target_channel = dup_string(request->target_channel);
+    item.owned_target_chat_id = dup_string(request->target_chat_id);
+
+    item.view.session_id = item.owned_session_id;
+    item.view.user_text = item.owned_user_text;
+    item.view.source_channel = item.owned_source_channel;
+    item.view.source_chat_id = item.owned_source_chat_id;
+    item.view.source_sender_id = item.owned_source_sender_id;
+    item.view.source_message_id = item.owned_source_message_id;
+    item.view.source_cap = item.owned_source_cap;
+    item.view.target_channel = item.owned_target_channel;
+    item.view.target_chat_id = item.owned_target_chat_id;
+
+    if ((request->session_id && !item.owned_session_id) ||
+            (request->source_channel && !item.owned_source_channel) ||
+            (request->source_chat_id && !item.owned_source_chat_id) ||
+            (request->source_sender_id && !item.owned_source_sender_id) ||
+            (request->source_message_id && !item.owned_source_message_id) ||
+            (request->source_cap && !item.owned_source_cap) ||
+            (request->target_channel && !item.owned_target_channel) ||
+            (request->target_chat_id && !item.owned_target_chat_id) ||
+            !item.owned_user_text) {
+        free_request_item(&item);
+        return ESP_ERR_NO_MEM;
+    }
+
+    *out_item = item;
+    return ESP_OK;
 }
 
 static void free_response_item(claw_core_response_item_t *item)
@@ -415,7 +465,7 @@ static void free_cached_contexts(claw_core_cached_context_t *contexts, size_t co
     free(contexts);
 }
 
-static void clear_control_queue_locked(void)
+static void clear_insert_queue_locked(void)
 {
     size_t i;
 
@@ -423,14 +473,13 @@ static void clear_control_queue_locked(void)
         return;
     }
 
-    for (i = 0; i < s_core->control_queue_count; i++) {
-        size_t index = (s_core->control_queue_head + i) % CLAW_CORE_CONTROL_QUEUE_LEN;
+    for (i = 0; i < s_core->insert_queue_count; i++) {
+        size_t index = (s_core->insert_queue_head + i) % CLAW_CORE_INSERT_QUEUE_LEN;
 
-        free(s_core->control_queue[index].user_text);
-        memset(&s_core->control_queue[index], 0, sizeof(s_core->control_queue[index]));
+        free_request_item(&s_core->insert_queue[index]);
     }
-    s_core->control_queue_head = 0;
-    s_core->control_queue_count = 0;
+    s_core->insert_queue_head = 0;
+    s_core->insert_queue_count = 0;
 }
 
 static void claw_core_set_agent_loop_phase(claw_core_agent_loop_phase_t phase)
@@ -445,14 +494,14 @@ static void claw_core_set_agent_loop_phase(claw_core_agent_loop_phase_t phase)
     }
 }
 
-static bool dequeue_user_interrupts(uint32_t request_id,
-                                    char **texts,
-                                    size_t max_count,
-                                    size_t *out_count)
+static bool dequeue_inserted_user_inputs(const char *session_id,
+                                         char **texts,
+                                         size_t max_count,
+                                         size_t *out_count)
 {
     bool found = false;
 
-    if (!texts || max_count == 0 || !out_count) {
+    if (!session_id || session_id[0] == '\0' || !texts || max_count == 0 || !out_count) {
         return false;
     }
     *out_count = 0;
@@ -463,22 +512,23 @@ static bool dequeue_user_interrupts(uint32_t request_id,
     if (xSemaphoreTake(s_core->inflight_lock, portMAX_DELAY) != pdTRUE) {
         return false;
     }
-    while (s_core->control_queue_count > 0 && *out_count < max_count) {
-        claw_core_control_item_t *item = &s_core->control_queue[s_core->control_queue_head];
+    while (s_core->insert_queue_count > 0 && *out_count < max_count) {
+        claw_core_request_item_t *item = &s_core->insert_queue[s_core->insert_queue_head];
 
-        if (item->request_id != request_id) {
+        if (!item->view.session_id || strcmp(item->view.session_id, session_id) != 0) {
             break;
         }
-        texts[*out_count] = item->user_text;
-        item->user_text = NULL;
-        item->request_id = 0;
-        s_core->control_queue_head = (s_core->control_queue_head + 1) % CLAW_CORE_CONTROL_QUEUE_LEN;
-        s_core->control_queue_count--;
+        texts[*out_count] = item->owned_user_text;
+        item->owned_user_text = NULL;
+        item->view.user_text = NULL;
+        free_request_item(item);
+        s_core->insert_queue_head = (s_core->insert_queue_head + 1) % CLAW_CORE_INSERT_QUEUE_LEN;
+        s_core->insert_queue_count--;
         (*out_count)++;
         found = true;
     }
-    if (s_core->control_queue_count == 0) {
-        s_core->control_queue_head = 0;
+    if (s_core->insert_queue_count == 0) {
+        s_core->insert_queue_head = 0;
     }
     xSemaphoreGive(s_core->inflight_lock);
     return found;
@@ -505,25 +555,27 @@ static bool take_user_interrupt_http_abort(uint32_t request_id)
     return taken;
 }
 
-static esp_err_t queue_user_interrupt_locked(uint32_t request_id, char *owned_text)
+static esp_err_t queue_insert_request_locked(claw_core_request_item_t *item)
 {
     size_t tail;
 
-    if (s_core->inflight_request_id != request_id) {
+    if (!item || !item->view.session_id || item->view.session_id[0] == '\0' ||
+            s_core->inflight_request_id == 0 ||
+            s_core->inflight_session_id[0] == '\0' ||
+            strcmp(s_core->inflight_session_id, item->view.session_id) != 0) {
         return ESP_ERR_NOT_FOUND;
     }
-    if (s_core->agent_loop_phase == CLAW_CORE_AGENT_LOOP_PHASE_IDLE ||
-            s_core->agent_loop_phase == CLAW_CORE_AGENT_LOOP_PHASE_FINALIZING) {
+    if (!claw_core_agent_loop_phase_is_insertable(s_core->agent_loop_phase)) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (s_core->control_queue_count >= CLAW_CORE_CONTROL_QUEUE_LEN) {
+    if (s_core->insert_queue_count >= CLAW_CORE_INSERT_QUEUE_LEN) {
         return ESP_ERR_NO_MEM;
     }
 
-    tail = (s_core->control_queue_head + s_core->control_queue_count) % CLAW_CORE_CONTROL_QUEUE_LEN;
-    s_core->control_queue[tail].request_id = request_id;
-    s_core->control_queue[tail].user_text = owned_text;
-    s_core->control_queue_count++;
+    tail = (s_core->insert_queue_head + s_core->insert_queue_count) % CLAW_CORE_INSERT_QUEUE_LEN;
+    s_core->insert_queue[tail] = *item;
+    memset(item, 0, sizeof(*item));
+    s_core->insert_queue_count++;
 
     if (s_core->agent_loop_phase == CLAW_CORE_AGENT_LOOP_PHASE_IN_LLM_HTTP &&
             s_core->inflight_abort_reason != CLAW_CORE_CONTROL_ABORT_REASON_CANCEL) {
@@ -531,6 +583,43 @@ static esp_err_t queue_user_interrupt_locked(uint32_t request_id, char *owned_te
         s_core->inflight_abort_reason = CLAW_CORE_CONTROL_ABORT_REASON_USER_INTERRUPT;
     }
     return ESP_OK;
+}
+
+static esp_err_t try_queue_insert_request(claw_core_request_item_t *item)
+{
+    uint32_t inserted_request_id;
+    uint32_t inflight_request_id;
+    char session_id[CLAW_CORE_INFLIGHT_SESSION_ID_SIZE] = {0};
+    size_t depth;
+    esp_err_t err;
+
+    if (!s_core || !s_core->inflight_lock || !item) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    inserted_request_id = item->view.request_id;
+    if (item->view.session_id) {
+        strlcpy(session_id, item->view.session_id, sizeof(session_id));
+    }
+
+    if (xSemaphoreTake(s_core->inflight_lock, pdMS_TO_TICKS(200)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    inflight_request_id = s_core->inflight_request_id;
+    err = queue_insert_request_locked(item);
+    depth = s_core->insert_queue_count;
+    xSemaphoreGive(s_core->inflight_lock);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG,
+                 "inserted user input request=%" PRIu32 " into inflight_request=%" PRIu32
+                 " session=%s depth=%u",
+                 inserted_request_id,
+                 inflight_request_id,
+                 session_id,
+                 (unsigned)depth);
+    }
+    return err;
 }
 
 static void clear_user_interrupt_abort(uint32_t request_id)
@@ -1298,13 +1387,13 @@ static esp_err_t persist_session_user_messages_if_configured(const claw_core_req
                                                              size_t text_count,
                                                              bool *out_persisted)
 {
-    claw_session_record_t records[CLAW_CORE_CONTROL_QUEUE_LEN];
+    claw_session_record_t records[CLAW_CORE_INSERT_QUEUE_LEN];
     size_t i;
 
     if (out_persisted) {
         *out_persisted = false;
     }
-    if (!request || !texts || text_count == 0 || text_count > CLAW_CORE_CONTROL_QUEUE_LEN) {
+    if (!request || !texts || text_count == 0 || text_count > CLAW_CORE_INSERT_QUEUE_LEN) {
         return ESP_ERR_INVALID_ARG;
     }
     if (!request_has_session_persistence(request)) {
@@ -1652,8 +1741,8 @@ static esp_err_t handle_pending_user_interrupts(const claw_core_request_item_t *
                                                 cJSON **runtime_messages,
                                                 bool *out_drained)
 {
-    char *texts[CLAW_CORE_CONTROL_QUEUE_LEN] = {0};
-    const char *persist_texts[CLAW_CORE_CONTROL_QUEUE_LEN] = {0};
+    char *texts[CLAW_CORE_INSERT_QUEUE_LEN] = {0};
+    const char *persist_texts[CLAW_CORE_INSERT_QUEUE_LEN] = {0};
     size_t text_count = 0;
     size_t i;
     bool persisted = false;
@@ -1666,10 +1755,10 @@ static esp_err_t handle_pending_user_interrupts(const claw_core_request_item_t *
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (!dequeue_user_interrupts(request->view.request_id,
-                                 texts,
-                                 CLAW_CORE_CONTROL_QUEUE_LEN,
-                                 &text_count)) {
+    if (!dequeue_inserted_user_inputs(request->view.session_id,
+                                      texts,
+                                      CLAW_CORE_INSERT_QUEUE_LEN,
+                                      &text_count)) {
         return ESP_OK;
     }
     clear_user_interrupt_abort(request->view.request_id);
@@ -1757,7 +1846,7 @@ static void claw_core_task(void *arg)
             s_core->agent_loop_phase = CLAW_CORE_AGENT_LOOP_PHASE_BEFORE_BUILD_ITERATION_CONTEXT;
             s_core->inflight_abort = false;
             s_core->inflight_abort_reason = CLAW_CORE_CONTROL_ABORT_REASON_NONE;
-            clear_control_queue_locked();
+            clear_insert_queue_locked();
             xSemaphoreGive(s_core->inflight_lock);
         }
         claw_llm_http_arm_abort(&s_core->inflight_abort);
@@ -2045,7 +2134,7 @@ finish_request:
             s_core->agent_loop_phase = CLAW_CORE_AGENT_LOOP_PHASE_IDLE;
             s_core->inflight_abort = false;
             s_core->inflight_abort_reason = CLAW_CORE_CONTROL_ABORT_REASON_NONE;
-            clear_control_queue_locked();
+            clear_insert_queue_locked();
             xSemaphoreGive(s_core->inflight_lock);
             if (was_cancelled && err != ESP_OK && response.view.error_message) {
                 /* Replace the generic transport error with a clearer one. */
@@ -2315,56 +2404,6 @@ esp_err_t claw_core_cancel_request(uint32_t request_id)
     return armed ? ESP_OK : ESP_ERR_NOT_FOUND;
 }
 
-esp_err_t claw_core_submit_user_message_interrupt_for_session(const char *session_id,
-                                                              const char *user_text,
-                                                              uint32_t *out_request_id)
-{
-    char *owned_text = NULL;
-    uint32_t request_id;
-    esp_err_t err;
-
-    if (!s_core || !s_core->initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (!session_id || session_id[0] == '\0' || !user_text || user_text[0] == '\0') {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    owned_text = dup_string(user_text);
-    if (!owned_text) {
-        return ESP_ERR_NO_MEM;
-    }
-
-    if (xSemaphoreTake(s_core->inflight_lock, pdMS_TO_TICKS(200)) != pdTRUE) {
-        free(owned_text);
-        return ESP_ERR_TIMEOUT;
-    }
-    if (s_core->inflight_request_id == 0 ||
-            s_core->inflight_session_id[0] == '\0' ||
-            strcmp(s_core->inflight_session_id, session_id) != 0) {
-        xSemaphoreGive(s_core->inflight_lock);
-        free(owned_text);
-        return ESP_ERR_NOT_FOUND;
-    }
-
-    request_id = s_core->inflight_request_id;
-    err = queue_user_interrupt_locked(request_id, owned_text);
-    if (err == ESP_OK) {
-        owned_text = NULL;
-        if (out_request_id) {
-            *out_request_id = request_id;
-        }
-        ESP_LOGI(TAG,
-                 "queued user interrupt request=%" PRIu32 " session=%s depth=%u",
-                 request_id,
-                 session_id,
-                 (unsigned)s_core->control_queue_count);
-    }
-    xSemaphoreGive(s_core->inflight_lock);
-    free(owned_text);
-    return err;
-}
-
 claw_core_agent_loop_phase_t claw_core_get_agent_loop_phase(void)
 {
     claw_core_agent_loop_phase_t phase = CLAW_CORE_AGENT_LOOP_PHASE_IDLE;
@@ -2384,44 +2423,26 @@ esp_err_t claw_core_submit(const claw_core_request_t *request, uint32_t timeout_
 {
     claw_core_request_item_t item = {0};
     TickType_t ticks;
+    esp_err_t err;
 
     if (!s_core || !s_core->started || !request || !request->user_text || request->user_text[0] == '\0') {
         return (s_core && s_core->started) ? ESP_ERR_INVALID_ARG : ESP_ERR_INVALID_STATE;
     }
 
-    item.view.request_id = request->request_id;
-    item.view.flags = request->flags;
-    item.owned_session_id = dup_string(request->session_id);
-    item.owned_user_text = dup_string(request->user_text);
-    item.owned_source_channel = dup_string(request->source_channel);
-    item.owned_source_chat_id = dup_string(request->source_chat_id);
-    item.owned_source_sender_id = dup_string(request->source_sender_id);
-    item.owned_source_message_id = dup_string(request->source_message_id);
-    item.owned_source_cap = dup_string(request->source_cap);
-    item.owned_target_channel = dup_string(request->target_channel);
-    item.owned_target_chat_id = dup_string(request->target_chat_id);
+    err = clone_request_item(request, &item);
+    if (err != ESP_OK) {
+        return err;
+    }
 
-    item.view.session_id = item.owned_session_id;
-    item.view.user_text = item.owned_user_text;
-    item.view.source_channel = item.owned_source_channel;
-    item.view.source_chat_id = item.owned_source_chat_id;
-    item.view.source_sender_id = item.owned_source_sender_id;
-    item.view.source_message_id = item.owned_source_message_id;
-    item.view.source_cap = item.owned_source_cap;
-    item.view.target_channel = item.owned_target_channel;
-    item.view.target_chat_id = item.owned_target_chat_id;
-
-    if ((request->session_id && !item.owned_session_id) ||
-            (request->source_channel && !item.owned_source_channel) ||
-            (request->source_chat_id && !item.owned_source_chat_id) ||
-            (request->source_sender_id && !item.owned_source_sender_id) ||
-            (request->source_message_id && !item.owned_source_message_id) ||
-            (request->source_cap && !item.owned_source_cap) ||
-            (request->target_channel && !item.owned_target_channel) ||
-            (request->target_chat_id && !item.owned_target_chat_id) ||
-            !item.owned_user_text) {
-        free_request_item(&item);
-        return ESP_ERR_NO_MEM;
+    if (request->flags & CLAW_CORE_REQUEST_FLAG_USER_INTERRUPT) {
+        err = try_queue_insert_request(&item);
+        if (err == ESP_OK) {
+            return ESP_OK;
+        }
+        if (err == ESP_ERR_NO_MEM || err == ESP_ERR_TIMEOUT) {
+            free_request_item(&item);
+            return err;
+        }
     }
 
     ticks = (timeout_ms == UINT32_MAX) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);

@@ -51,6 +51,7 @@ static bool s_interrupt_provider_enabled;
 static bool s_interrupt_provider_done;
 static bool s_fail_user_persist;
 static esp_err_t s_queue_full_err = ESP_OK;
+static uint32_t s_next_interrupt_request_id;
 
 static char *test_dup_string(const char *text)
 {
@@ -92,6 +93,19 @@ static void test_reset_scenario(test_backend_mode_t mode, uint32_t request_id)
     s_interrupt_provider_done = false;
     s_fail_user_persist = false;
     s_queue_full_err = ESP_OK;
+    s_next_interrupt_request_id = request_id + 10000;
+}
+
+static esp_err_t submit_user_interrupt(const char *session_id, const char *text)
+{
+    claw_core_request_t request = {
+        .request_id = s_next_interrupt_request_id++,
+        .flags = CLAW_CORE_REQUEST_FLAG_USER_INTERRUPT,
+        .session_id = session_id,
+        .user_text = text,
+    };
+
+    return claw_core_submit(&request, 1000);
 }
 
 static esp_err_t test_persist_session(const claw_session_persist_batch_t *batch, void *user_ctx)
@@ -222,8 +236,6 @@ static esp_err_t test_session_history_collect(const claw_core_request_t *request
 
 static esp_err_t test_request_start(const claw_core_request_t *request, void *user_ctx)
 {
-    uint32_t interrupt_request_id = 0;
-
     (void)user_ctx;
 
     if (!request || !s_request_start_interrupt_enabled ||
@@ -234,26 +246,11 @@ static esp_err_t test_request_start(const claw_core_request_t *request, void *us
     s_saw_before_build_phase =
         claw_core_get_agent_loop_phase() ==
         CLAW_CORE_AGENT_LOOP_PHASE_BEFORE_BUILD_ITERATION_CONTEXT;
-    TEST_ASSERT_EQUAL(ESP_OK,
-                      claw_core_submit_user_message_interrupt_for_session(request->session_id,
-                                                                         "B",
-                                                                         &interrupt_request_id));
-    TEST_ASSERT_EQUAL(request->request_id, interrupt_request_id);
-    TEST_ASSERT_EQUAL(ESP_OK,
-                      claw_core_submit_user_message_interrupt_for_session(request->session_id,
-                                                                         "C",
-                                                                         NULL));
-    TEST_ASSERT_EQUAL(ESP_OK,
-                      claw_core_submit_user_message_interrupt_for_session(request->session_id,
-                                                                         "D",
-                                                                         NULL));
-    TEST_ASSERT_EQUAL(ESP_OK,
-                      claw_core_submit_user_message_interrupt_for_session(request->session_id,
-                                                                         "E",
-                                                                         NULL));
-    s_queue_full_err = claw_core_submit_user_message_interrupt_for_session(request->session_id,
-                                                                          "F",
-                                                                          NULL);
+    TEST_ASSERT_EQUAL(ESP_OK, submit_user_interrupt(request->session_id, "B"));
+    TEST_ASSERT_EQUAL(ESP_OK, submit_user_interrupt(request->session_id, "C"));
+    TEST_ASSERT_EQUAL(ESP_OK, submit_user_interrupt(request->session_id, "D"));
+    TEST_ASSERT_EQUAL(ESP_OK, submit_user_interrupt(request->session_id, "E"));
+    s_queue_full_err = submit_user_interrupt(request->session_id, "F");
     return ESP_OK;
 }
 
@@ -273,25 +270,11 @@ static esp_err_t test_interrupt_provider_collect(const claw_core_request_t *requ
 
     s_saw_building_phase =
         claw_core_get_agent_loop_phase() == CLAW_CORE_AGENT_LOOP_PHASE_BUILDING_ITERATION_CONTEXT;
-    TEST_ASSERT_EQUAL(ESP_OK,
-                      claw_core_submit_user_message_interrupt_for_session(request->session_id,
-                                                                         "B",
-                                                                         NULL));
-    TEST_ASSERT_EQUAL(ESP_OK,
-                      claw_core_submit_user_message_interrupt_for_session(request->session_id,
-                                                                         "C",
-                                                                         NULL));
-    TEST_ASSERT_EQUAL(ESP_OK,
-                      claw_core_submit_user_message_interrupt_for_session(request->session_id,
-                                                                         "D",
-                                                                         NULL));
-    TEST_ASSERT_EQUAL(ESP_OK,
-                      claw_core_submit_user_message_interrupt_for_session(request->session_id,
-                                                                         "E",
-                                                                         NULL));
-    s_queue_full_err = claw_core_submit_user_message_interrupt_for_session(request->session_id,
-                                                                          "F",
-                                                                          NULL);
+    TEST_ASSERT_EQUAL(ESP_OK, submit_user_interrupt(request->session_id, "B"));
+    TEST_ASSERT_EQUAL(ESP_OK, submit_user_interrupt(request->session_id, "C"));
+    TEST_ASSERT_EQUAL(ESP_OK, submit_user_interrupt(request->session_id, "D"));
+    TEST_ASSERT_EQUAL(ESP_OK, submit_user_interrupt(request->session_id, "E"));
+    s_queue_full_err = submit_user_interrupt(request->session_id, "F");
     s_interrupt_provider_done = true;
     return ESP_ERR_NOT_FOUND;
 }
@@ -322,10 +305,7 @@ static esp_err_t test_call_cap(const char *cap_name,
     s_tool_call_count++;
     if (s_backend_mode == TEST_BACKEND_TOOL_INTERRUPT && s_tool_call_count == 1) {
         TEST_ASSERT_EQUAL(CLAW_CORE_AGENT_LOOP_PHASE_RUNNING_TOOL, claw_core_get_agent_loop_phase());
-        TEST_ASSERT_EQUAL(ESP_OK,
-                          claw_core_submit_user_message_interrupt_for_session(request->session_id,
-                                                                             "I",
-                                                                             NULL));
+        TEST_ASSERT_EQUAL(ESP_OK, submit_user_interrupt(request->session_id, "I"));
     }
 
     *out_output = test_dup_string("{\"ok\":true}");
@@ -414,18 +394,12 @@ static esp_err_t test_backend_chat(void *backend_ctx,
     s_backend_call_count++;
 
     if (s_backend_mode == TEST_BACKEND_HTTP_ABORT && s_backend_call_count == 1) {
-        TEST_ASSERT_EQUAL(ESP_OK,
-                          claw_core_submit_user_message_interrupt_for_session(s_active_session_id,
-                                                                             "G",
-                                                                             NULL));
+        TEST_ASSERT_EQUAL(ESP_OK, submit_user_interrupt(s_active_session_id, "G"));
         *out_error_message = test_dup_string("aborted");
         return ESP_ERR_INVALID_STATE;
     }
     if (s_backend_mode == TEST_BACKEND_AFTER_LLM_INTERRUPT && s_backend_call_count == 1) {
-        TEST_ASSERT_EQUAL(ESP_OK,
-                          claw_core_submit_user_message_interrupt_for_session(s_active_session_id,
-                                                                             "H",
-                                                                             NULL));
+        TEST_ASSERT_EQUAL(ESP_OK, submit_user_interrupt(s_active_session_id, "H"));
         return test_set_tool_response(out_response, 2);
     }
     if (s_backend_mode == TEST_BACKEND_TOOL_INTERRUPT && s_backend_call_count == 1) {
@@ -503,6 +477,25 @@ static void submit_and_expect_ok(uint32_t request_id, const char *session_id, co
 {
     claw_core_request_t request = {
         .request_id = request_id,
+        .session_id = session_id,
+        .user_text = text,
+    };
+    claw_core_response_t response = {0};
+
+    strlcpy(s_active_session_id, session_id ? session_id : "", sizeof(s_active_session_id));
+    TEST_ASSERT_EQUAL(ESP_OK, claw_core_submit(&request, 1000));
+    TEST_ASSERT_EQUAL(ESP_OK, claw_core_receive_for(request_id, &response, 5000));
+    TEST_ASSERT_EQUAL(request_id, response.request_id);
+    TEST_ASSERT_EQUAL(CLAW_CORE_RESPONSE_STATUS_OK, response.status);
+    TEST_ASSERT_NOT_NULL(response.text);
+    claw_core_response_free(&response);
+}
+
+static void submit_interrupt_flagged_and_expect_ok(uint32_t request_id, const char *session_id, const char *text)
+{
+    claw_core_request_t request = {
+        .request_id = request_id,
+        .flags = CLAW_CORE_REQUEST_FLAG_USER_INTERRUPT,
         .session_id = session_id,
         .user_text = text,
     };
@@ -634,6 +627,18 @@ TEST_CASE("claw_core handles active user interrupts with FIFO restarts", "[claw_
     TEST_ASSERT_EQUAL(1, count_session_records("s-tool", CLAW_SESSION_RECORD_ASSISTANT_TOOL));
     TEST_ASSERT_EQUAL(1, count_session_records("s-tool", CLAW_SESSION_RECORD_TOOL_RESULT));
     assert_messages_contain_users(1, "A3", "I", NULL, NULL, NULL);
+}
+
+TEST_CASE("claw_core queues interrupt flagged requests without an insertable loop", "[claw_core]")
+{
+    ensure_core_ready();
+
+    test_reset_scenario(TEST_BACKEND_FINAL, 1010);
+    submit_interrupt_flagged_and_expect_ok(1010, "s-idle-fallback", "A4");
+    TEST_ASSERT_EQUAL(1, s_backend_call_count);
+    TEST_ASSERT_EQUAL(1, count_session_records("s-idle-fallback", CLAW_SESSION_RECORD_USER));
+    TEST_ASSERT_EQUAL(1, count_session_records("s-idle-fallback", CLAW_SESSION_RECORD_ASSISTANT_FINAL));
+    assert_messages_contain_users(0, "A4", NULL, NULL, NULL, NULL);
 }
 
 void app_main(void)
