@@ -47,8 +47,9 @@ idf.py menuconfig
 ```
 
 ## 5 编译与烧录
-记得接板子
 ``` sh
 idf.py build
+# 记得接板子
 idf.py flash monitor
 ```
+注：LLM api、WiFi信息等配置存储在ESP32 芯片的 NVS 分区，重新烧录不会丢失；但记忆存储在FATFS，重新烧录会丢失。猜测可能的解决办法：通过修改application\edge_agent\fatfs_image\memory恢复；添加新的skill持久化新增配置
