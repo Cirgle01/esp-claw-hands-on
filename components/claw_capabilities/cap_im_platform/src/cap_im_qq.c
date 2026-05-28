@@ -1991,7 +1991,7 @@ esp_err_t cap_im_qq_register_group(void)
 void cap_im_qq_set_msg_type(int msg_type)
 {
     if (!s_qq_initialized) {
-        return ESP_ERR_INVALID_STATE;
+        return;
     }
     s_qq.msg_type = msg_type;
 }
