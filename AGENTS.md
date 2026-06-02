@@ -69,12 +69,12 @@ The main entry point is `application/edge_agent/main/main.c`.
 
 ## Project-Specific Notes
 
-- Architecture constraints: [`design.md`](.agent/design.md)
-- docs guide: [`docs.md`](.agent/docs.md)
-- Common gotchas: [`gotchas.md`](.agent/gotchas.md)
-- Specs (`.agent/spec/`):
-  - lua module spec: [lua-module-spec.md](.agent/spec/lua-module-spec.md)
-  - claw skill spec: [claw-skill-spec.md](.agent/spec/claw-skill-spec.md)
+- Architecture constraints: [`design.md`](.agents/design.md)
+- docs guide: [`docs.md`](.agents/docs.md)
+- Common gotchas: [`gotchas.md`](.agents/gotchas.md)
+- Specs (`.agents/spec/`):
+  - lua module spec: [lua-module-spec.md](.agents/spec/lua-module-spec.md)
+  - claw skill spec: [claw-skill-spec.md](.agents/spec/claw-skill-spec.md)
 
 ## Code Style
 
@@ -112,3 +112,13 @@ The main entry point is `application/edge_agent/main/main.c`.
 - Lua module registration: `components/common/app_claw/app_lua_modules.c`
 - App config schema/storage: `application/edge_agent/components/app_config/`
 - Board definitions: `application/edge_agent/boards/`
+
+## AGENTS.md Best-Practice Notes
+
+Use this file as a compact router, not an encyclopedia.
+
+- Keep instructions specific to this repository and this documentation workflow.
+- Prefer exact file paths and commands over broad principles.
+- Point agents to the right source files instead of duplicating long architecture explanations here.
+- Document boundaries and exceptions explicitly, especially when "do not create a page by default" is the expected behavior.
+- Update this guide when the docs workflow changes; stale agent docs are worse than missing prose.
