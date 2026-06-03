@@ -78,6 +78,8 @@ GPIO48:板载WS2812B RGB彩灯
 4. INMP441 麦克风
 5. 板载WS2812B RGB彩灯
 
+> 注: 其中屏幕和麦克风使用I2S配置, 对agent透明, Agent 通过 board_manager + audio/display Lua 模块使用即可
+
 ### GPIO对应表
 | GPIO | 用途 |
 |---|---|
