@@ -37,7 +37,7 @@ cd esp-claw-hands-on/application/edge_agent
 注：此后所有`idf.py *`命令都要在IDF终端操作
 ``` sh
 # 先安装esp-bmgr-assist
-pip install esp-bmgr-assist
+pip install esp-bmgr-assist==0.7.0
 idf.py gen-bmgr-config -c ./boards -b esp32_S3_DevKitC_1_breadboard
 ```
 
@@ -72,7 +72,7 @@ GPIO48:板载WS2812B RGB彩灯
 
 ## 连接硬件信息
 ### 确认连接的硬件
-1. RGB灯带(16颗灯珠)
+1. RGB灯带(WS2812, 16颗灯珠)
 2. LCD屏幕
 3. DHT11 温湿度传感器
 4. INMP441 麦克风
@@ -89,7 +89,7 @@ GPIO48:板载WS2812B RGB彩灯
 | 5 | SPI MOSI（LCD）
 | 6 | LCD RST
 | 7 | LCD DC
-| 13 | RGB灯带(16颗灯珠)
+| 13 | RGB灯带
 | 15 | LCD CS
 | 16 | LCD 背光
 | 17 | DHT11 温湿度传感器
