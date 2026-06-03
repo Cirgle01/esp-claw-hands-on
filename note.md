@@ -53,3 +53,49 @@ idf.py build
 idf.py flash monitor
 ```
 注：LLM api、WiFi信息等配置存储在ESP32 芯片的 NVS 分区，重新烧录不会丢失；但记忆存储在FATFS，重新烧录会丢失。猜测可能的解决办法：通过修改application\edge_agent\fatfs_image\memory恢复；添加新的skill持久化新增配置
+
+# 硬件情况
+
+## 核心板信息
+以下是使用的鹿小班ESP32-S3-N16R8核心板的商家介绍内容:
+```
+ESP32-S3关键注意事项：
+1. 引脚限制：GPIO34-GPIO37为板载Flash/PSRAM专用引脚，禁止用作普通IO
+2. ADC限制：ADC2通道在WiFi开启时不可用，优先使用ADC1(GPIO0-GPIO7, GPIO16-GPIO21)
+3. Strapping引脚：GPIO0,GPIO45,GPIO46为启动配置引脚，GPIO0拉低进入下载模式
+4. USB-OTG:GPIO47/GPIO48为原生USB 引脚，可直接做USB主机/设备，无需额外芯片
+5. PSRAM 支持：N16R8 自带8MB PSRAIM，工具菜单PSRAM选择OPI PSRAM即可启用
+
+GPIO48:板载WS2812B RGB彩灯
+```
+> 注: 事实上, esp-claw使用了io15作为LCD连接线, 且没有出现错误
+
+## 连接硬件信息
+### 确认连接的硬件
+1. RGB灯带(16颗灯珠)
+2. LCD屏幕
+3. DHT11 温湿度传感器
+4. INMP441 麦克风
+5. 板载WS2812B RGB彩灯
+
+### GPIO对应表
+| GPIO | 用途 |
+|---|---|
+| 1 | INMP441 SD（数据）
+| 2 | INMP441 WS（字选）
+| 4 | SPI SCLK（LCD）
+| 5 | SPI MOSI（LCD）
+| 6 | LCD RST
+| 7 | LCD DC
+| 13 | RGB灯带(16颗灯珠)
+| 15 | LCD CS
+| 16 | LCD 背光
+| 17 | DHT11 温湿度传感器
+| 42 | INMP441 SCK（位时钟）
+| 48 | 板载WS2812B RGB彩灯
+
+### 定义文件中设定内容
+| GPIO | 用途 |
+|---|---|
+| 9 |PDM DAC 输出 (fake_audio_dac依赖,用于支持官方演示中三合一模块)
+| 38 |RMT（WS2812 LED）(可能是官方板载led)
