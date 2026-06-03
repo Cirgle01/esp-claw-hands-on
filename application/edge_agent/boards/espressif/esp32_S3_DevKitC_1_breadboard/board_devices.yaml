@@ -30,8 +30,8 @@ devices:
     sub_type: "dvp"
     init_skip: true
     peripherals:
-      - name: i2c_master                   # Must match a periph_i2c name; provides SCCB i2c_handle to esp_video
-        frequency: 100000                   # SCCB I2C frequency (Hz)
+      - name: i2c_master                   # 校验要求，实际不初始化（init_skip: true）
+        frequency: 100000
 
   - name: camera
     type: custom
@@ -48,10 +48,17 @@ devices:
       sample_rate_hz: 16000           # Sample rate in Hz
 
   - name: audio_adc
-    type: custom
+    chip: internal                    # 无需外部编解码器芯片，INMP441 直接输出 I2S
+    type: audio_codec
     version: default
     config:
-      sample_rate_hz: 16000           # Sample rate in Hz
+      adc_enabled: true
+      dac_enabled: false
+      adc_max_channel: 1
+      adc_channel_mask: "1"
+      adc_init_gain: 0
+    peripherals:
+      - name: i2s_audio_in
 
 
   - name: display_lcd
